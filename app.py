@@ -66,10 +66,44 @@ def download_youtube(url, out_dir, max_height, max_minutes, cookies_path=None):
         ),
         "merge_output_format": "mp4",
         "outtmpl": str(out_dir / "source.%(ext)s"),
+        "retries": 5,
+        "fragment_retries": 5,
+        "socket_timeout": 30,
     })
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.extract_info(url, download=True)
+    # Coba beberapa konfigurasi klien YouTube bila yang pertama ditolak
+    attempts = [
+        None,
+        {"youtube": {"player_client": ["ios"]}},
+        {"youtube": {"player_client": ["mweb"]}},
+    ]
+    last_error = None
+
+    for extractor_args in attempts:
+        attempt_opts = dict(opts)
+        if extractor_args:
+            attempt_opts["extractor_args"] = extractor_args
+        try:
+            with yt_dlp.YoutubeDL(attempt_opts) as ydl:
+                ydl.extract_info(url, download=True)
+            last_error = None
+            break
+        except Exception as error:
+            last_error = error
+            for leftover in out_dir.glob("source.*"):
+                leftover.unlink(missing_ok=True)
+
+    if last_error is not None:
+        msg = str(last_error)
+        if any(k in msg for k in ("403", "429", "Sign in", "bot")):
+            raise RuntimeError(
+                "YouTube menolak unduhan (HTTP 403/429 atau verifikasi "
+                "bot). Ini biasanya karena IP server diblokir. Coba: "
+                "(1) jalankan aplikasi di komputer sendiri, (2) unggah "
+                "cookies.txt, atau (3) pakai mode Upload file. "
+                f"Detail: {msg[-300:]}"
+            )
+        raise RuntimeError(f"Gagal mengunduh: {msg[-300:]}")
 
     files = [
         p for p in out_dir.glob("source.*")
