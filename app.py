@@ -73,9 +73,11 @@ tab_youtube, tab_upload = st.tabs(
     ["🔗 Link YouTube", "📁 Upload Video"]
 )
 
+
 with tab_youtube:
     st.caption(
-        "Tempel link video YouTube untuk melihat pratinjau."
+        "Masukkan link YouTube untuk memeriksa format "
+        "link dan menyiapkan video."
     )
 
     youtube_url = st.text_input(
@@ -84,25 +86,56 @@ with tab_youtube:
         key="youtube_url"
     )
 
-    if youtube_url:
-        video_id = get_youtube_id(youtube_url)
+    video_id = get_youtube_id(youtube_url) if youtube_url else None
 
-        if video_id:
-            st.success("Format link berhasil dikenali.")
+    if video_id:
+        components.iframe(
+            f"https://www.youtube-nocookie.com/embed/{video_id}",
+            height=315,
+            scrolling=False
+        )
 
-            components.iframe(
-                f"https://www.youtube-nocookie.com/embed/{video_id}",
-                height=315,
-                scrolling=False
+    if st.button(
+        "🔍 Analisis Link YouTube",
+        type="primary",
+        use_container_width=True,
+        key="analyze_youtube"
+    ):
+        if not youtube_url.strip():
+            st.error("Tempel link YouTube terlebih dahulu.")
+
+        elif not video_id:
+            st.error(
+                "Format link tidak dikenali. "
+                "Gunakan link youtube.com/watch, youtu.be, "
+                "atau youtube.com/shorts."
             )
 
-            st.info(
-                "Pratinjau tidak otomatis mengunduh video. "
-                "Untuk memotongnya, gunakan file yang kamu miliki "
-                "atau sudah mendapat izin untuk diolah."
-            )
         else:
-            st.error("Link YouTube tidak dikenali.")
+            st.session_state["analyzed_youtube_url"] = youtube_url
+            st.session_state["analyzed_youtube_id"] = video_id
+
+    analyzed_id = st.session_state.get("analyzed_youtube_id")
+    analyzed_url = st.session_state.get("analyzed_youtube_url")
+
+    if analyzed_id and analyzed_url == youtube_url:
+        st.success("Link berhasil diperiksa dan ID video dikenali.")
+
+        st.write("**Langkah berikutnya:**")
+        st.write(
+            "1. Pastikan kamu memiliki izin untuk mengolah video ini."
+        )
+        st.write(
+            "2. Siapkan file video yang boleh kamu edit."
+        )
+        st.write(
+            "3. Buka tab Upload Video untuk memotong dan mengunduh klip."
+        )
+
+        st.info(
+            "Pemeriksaan ini memvalidasi format link, bukan "
+            "memastikan video bisa diunduh atau memberikan izin penggunaan."
+        )
 
 with tab_upload:
     uploaded_file = st.file_uploader(
