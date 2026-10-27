@@ -1,143 +1,251 @@
-import os, re, shutil, subprocess, tempfile, zipfile
+
+import re
+import io
+import zipfile
+import subprocess
+import tempfile
 from pathlib import Path
+
 import streamlit as st
+import streamlit.components.v1 as components
 
-st.set_page_config(page_title="ClipCerdas AI", page_icon="✂️", layout="centered")
-st.markdown("""
-<style>
-.block-container{max-width:900px;padding-top:1.5rem}
-.hero{padding:1.3rem;border-radius:18px;background:linear-gradient(135deg,#0f2f25,#176b4a);color:white}
-.hero h1{margin:0}.hero p{margin:.4rem 0 0}
-</style>
-<div class="hero"><h1>✂️ ClipCerdas AI</h1><p>Potong video pendek dengan rekomendasi momen dan subtitle Indonesia.</p></div>
-""", unsafe_allow_html=True)
-st.info("MVP v2. Mode AI memakai transkripsi ucapan dan aturan sederhana; rekomendasi bukan jaminan viral.")
 
-def run(args):
-    p = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    if p.returncode:
-        raise RuntimeError((p.stderr or "Proses gagal")[-2500:])
-    return p.stdout.strip()
+st.set_page_config(
+    page_title="ClipCerdas AI",
+    page_icon="🎬",
+    layout="wide"
+)
 
-def duration(path):
-    return float(run(["ffprobe","-v","error","-show_entries","format=duration","-of","default=noprint_wrappers=1:nokey=1",path]))
 
-def safe(s):
-    return (re.sub(r"[^A-Za-z0-9_-]+","_",Path(s).stem).strip("_") or "video")[:45]
+def get_youtube_id(url):
+    patterns = [
+        r"(?:youtube\.com/watch\?.*?v=)([A-Za-z0-9_-]{11})",
+        r"youtu\.be/([A-Za-z0-9_-]{11})",
+        r"youtube\.com/shorts/([A-Za-z0-9_-]{11})",
+        r"youtube\.com/live/([A-Za-z0-9_-]{11})",
+        r"youtube\.com/embed/([A-Za-z0-9_-]{11})",
+    ]
 
-def transcribe(path):
-    try:
-        from faster_whisper import WhisperModel
-    except Exception as e:
-        raise RuntimeError("faster-whisper belum terpasang. Pastikan requirements.txt berisi faster-whisper>=1.0,<2.0 lalu tunggu Streamlit selesai reboot. Detail: "+str(e))
-    model = WhisperModel("tiny", device="cpu", compute_type="int8")
-    segs, info = model.transcribe(path, language="id", vad_filter=True, beam_size=1)
-    rows = [{"start":float(s.start),"end":float(s.end),"text":s.text.strip()} for s in segs if s.text.strip()]
-    if not rows: raise RuntimeError("Tidak ditemukan ucapan yang jelas pada video.")
-    return rows
+    for pattern in patterns:
+        match = re.search(pattern, url.strip())
+        if match:
+            return match.group(1)
 
-def score(rows, a, b):
-    selected=[r for r in rows if r["end"]>a and r["start"]<b]
-    text=" ".join(r["text"] for r in selected)
-    words=re.findall(r"\w+",text.lower())
-    hooks=["ternyata","rahasia","jangan","cara","kenapa","tips","penting","bahaya","mudah","gagal","berhasil","uang","hemat","solusi","kesalahan","wajib","fakta"]
-    s=min(len(words)/max(1,b-a),3.5)+sum(1.8 for w in hooks if re.search(r"\b"+w+r"\b",text.lower()))
-    s+=min(3,sum(1.2 for r in selected if "?" in r["text"] or "!" in r["text"]))
-    return s,text
+    return None
 
-def pick(rows,total,secs,count):
-    maxstart=max(0,total-secs)
-    if maxstart==0:return [(0,total,"")]
-    candidates=[]; t=0
-    while t<=maxstart+.01:
-        end=min(total,t+secs); sc,txt=score(rows,t,end)
-        if txt:candidates.append((sc,t,end,txt))
-        t+=max(3,min(8,secs/4))
-    candidates.sort(reverse=True)
-    chosen=[]
-    for sc,a,b,txt in candidates:
-        if all(abs(a,x[0])>=secs*.65 for x in chosen):chosen.append((a,b,txt))
-        if len(chosen)>=count:break
-    if not chosen:
-        chosen=[(maxstart*i/max(1,count-1),min(total,maxstart*i/max(1,count-1)+secs),"") for i in range(count)]
-    return sorted(chosen,key=lambda x:x[0])
 
-def ts(v):
-    n=max(0,int(round(v*1000))); h,n=divmod(n,3600000); m,n=divmod(n,60000); s,ms=divmod(n,1000)
-    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+def cut_video(video_path, start, duration, output_path):
+    command = [
+        "ffmpeg",
+        "-y",
+        "-ss", str(start),
+        "-i", str(video_path),
+        "-t", str(duration),
+        "-c:v", "libx264",
+        "-c:a", "aac",
+        "-preset", "veryfast",
+        "-movflags", "+faststart",
+        str(output_path)
+    ]
 
-def srt(rows,a,b,path):
-    lines=[]; i=1
-    for r in rows:
-        x=max(a,r["start"]); y=min(b,r["end"])
-        if y<=x:continue
-        lines += [str(i),f"{ts(x-a)} --> {ts(y-a)}",r["text"].replace("-->","→").replace("\n"," "),""]
-        i+=1
-    open(path,"w",encoding="utf-8").write("\n".join(lines))
-    return i>1
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True
+    )
 
-def esc(p): return p.replace("\\","\\\\").replace(":","\\:").replace("'","\\'").replace(",","\\,")
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr[-1500:])
 
-if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
-    st.error("FFmpeg tidak tersedia. Periksa packages.txt harus berisi ffmpeg."); st.stop()
 
-up=st.file_uploader("1. Pilih video dari HP",type=["mp4","mov","m4v","mkv","webm"])
-if up:
-    mb=up.size/1048576
-    st.caption(f"{up.name} · {mb:.1f} MB")
-    if mb>100:st.warning("Video besar mungkin gagal di hosting gratis. Coba file di bawah 50–100 MB.")
-    mode=st.radio("Mode",["Potong berdasarkan waktu","AI rekomendasikan momen + subtitle Indonesia"])
-    c1,c2=st.columns(2)
-    with c1: secs=st.select_slider("Durasi tiap klip",options=[10,15,20,30,45,60],value=20,format_func=lambda x:f"{x} detik")
-    with c2: count=st.number_input("Jumlah klip",min_value=1,max_value=10,value=3)
-    vertical=st.checkbox("Format vertikal 9:16 (720 × 1280)",value=True)
-    if mode.startswith("AI"):st.caption("AI menilai kepadatan ucapan dan kata kunci. Pertama kali bisa lebih lama karena model diunduh.")
-    if st.button("Buat klip",type="primary",use_container_width=True):
-        with st.spinner("Memproses video, jangan tutup halaman…"):
-            try:
-                with tempfile.TemporaryDirectory() as tmp:
-                    inp=os.path.join(tmp,"input_video")
-                    open(inp,"wb").write(up.getbuffer())
-                    total=duration(inp)
-                    rows=[]
-                    if mode.startswith("AI"):
-                        st.write("Menganalisis ucapan bahasa Indonesia…")
-                        rows=transcribe(inp)
-                        windows=pick(rows,total,float(secs),int(count))
-                    else:
-                        n=min(int(count),max(1,int(total//secs))); length=min(float(secs),total); mx=max(0,total-length)
-                        starts=[0] if n==1 else [mx*i/(n-1) for i in range(n)]
-                        windows=[(a,min(total,a+length),"") for a in starts]
-                    name=safe(up.name); outs=[]; notes=[]
-                    for i,(a,b,excerpt) in enumerate(windows,1):
-                        out=os.path.join(tmp,f"{name}_klip_{i:02}.mp4")
-                        cmd=["ffmpeg","-hide_banner","-loglevel","error","-y","-ss",f"{a:.3f}","-i",inp,"-t",f"{max(.5,b-a):.3f}"]
-                        vf=[]
-                        if rows:
-                            sp=os.path.join(tmp,f"sub_{i:02}.srt")
-                            if srt(rows,a,b,sp):
-                                vf.append("subtitles='"+esc(sp)+"':force_style='FontName=DejaVu Sans,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=45'")
-                        if vertical:vf.append("scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1")
-                        if vf:cmd += ["-vf",",".join(vf)]
-                        cmd += ["-c:v","libx264","-preset","ultrafast","-crf","25","-c:a","aac","-b:a","128k","-movflags","+faststart",out]
-                        run(cmd)
-                        if not os.path.exists(out) or os.path.getsize(out)==0:raise RuntimeError(f"Klip {i} gagal dibuat.")
-                        outs.append(out)
-                        if excerpt:notes.append(f"Klip {i}: {excerpt[:200]}")
-                    zp=os.path.join(tmp,f"{name}_clipcerdas.zip")
-                    with zipfile.ZipFile(zp,"w",zipfile.ZIP_DEFLATED) as z:
-                        for p in outs:z.write(p,arcname=os.path.basename(p))
-                    st.success(f"Selesai! {len(outs)} klip berhasil dibuat.")
-                    if rows:
-                        st.success("Subtitle Indonesia ditanam ke video yang memiliki ucapan.")
-                        with st.expander("Lihat transkrip"):st.write(" ".join(r["text"] for r in rows))
-                        with st.expander("Cuplikan ucapan dari rekomendasi"):
-                            for n in notes:st.write(n)
-                    st.download_button("⬇️ Unduh semua klip (ZIP)",data=open(zp,"rb").read(),file_name=os.path.basename(zp),mime="application/zip",use_container_width=True)
-                    with st.expander("Pratinjau klip"):
-                        for p in outs:st.markdown("**"+os.path.basename(p)+"**");st.video(p)
-            except Exception as e:
-                st.error("Video belum berhasil diproses.");st.code(str(e))
-                st.caption("Coba MP4 kecil 1–3 menit. Mode AI lebih berat daripada mode waktu.")
+st.title("🎬 ClipCerdas AI")
+st.write(
+    "Ubah video panjang menjadi klip pendek untuk "
+    "TikTok, YouTube Shorts, dan Facebook Reels."
+)
+
 st.divider()
-st.caption("Mode AI memakai faster-whisper model tiny dan heuristik transkrip, bukan prediksi viral. Crop vertikal masih mengambil bagian tengah. Gunakan video yang kamu miliki atau punya izin.")
+
+# PILIH SUMBER VIDEO
+st.subheader("1. Pilih sumber video")
+
+tab_youtube, tab_upload = st.tabs(
+    ["🔗 Link YouTube", "📁 Upload Video"]
+)
+
+with tab_youtube:
+    st.caption(
+        "Tempel link video YouTube untuk melihat pratinjau."
+    )
+
+    youtube_url = st.text_input(
+        "Link YouTube",
+        placeholder="https://www.youtube.com/watch?v=...",
+        key="youtube_url"
+    )
+
+    if youtube_url:
+        video_id = get_youtube_id(youtube_url)
+
+        if video_id:
+            st.success("Format link berhasil dikenali.")
+
+            components.iframe(
+                f"https://www.youtube-nocookie.com/embed/{video_id}",
+                height=315,
+                scrolling=False
+            )
+
+            st.info(
+                "Pratinjau tidak otomatis mengunduh video. "
+                "Untuk memotongnya, gunakan file yang kamu miliki "
+                "atau sudah mendapat izin untuk diolah."
+            )
+        else:
+            st.error("Link YouTube tidak dikenali.")
+
+with tab_upload:
+    uploaded_file = st.file_uploader(
+        "Pilih file video milikmu",
+        type=["mp4", "mov", "mkv", "webm"]
+    )
+
+st.divider()
+
+# PEMOTONG VIDEO
+st.subheader("2. Atur klip video")
+
+st.caption(
+    "Fitur pemotongan ini memproses video yang diunggah, "
+    "bukan mengambil file dari link YouTube."
+)
+
+clip_duration = st.number_input(
+    "Durasi setiap klip (detik)",
+    min_value=10,
+    max_value=180,
+    value=30,
+    step=5
+)
+
+max_clips = st.number_input(
+    "Jumlah klip maksimal",
+    min_value=1,
+    max_value=20,
+    value=5,
+    step=1
+)
+
+if uploaded_file is not None:
+    st.video(uploaded_file)
+
+    if st.button("✂️ Buat Klip Video", type="primary"):
+        with st.spinner("Sedang memproses video..."):
+            try:
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_path = Path(temp_dir)
+
+                    input_path = temp_path / uploaded_file.name
+                    input_path.write_bytes(uploaded_file.getbuffer())
+
+                    probe = subprocess.run(
+                        [
+                            "ffprobe",
+                            "-v", "error",
+                            "-show_entries", "format=duration",
+                            "-of", "default=noprint_wrappers=1:nokey=1",
+                            str(input_path)
+                        ],
+                        capture_output=True,
+                        text=True
+                    )
+
+                    if probe.returncode != 0:
+                        st.error(
+                            "Video tidak dapat dibaca. "
+                            "Coba unggah video MP4."
+                        )
+                        st.stop()
+
+                    total_duration = float(probe.stdout.strip())
+
+                    if total_duration <= 0:
+                        st.error("Durasi video tidak valid.")
+                        st.stop()
+
+                    zip_buffer = io.BytesIO()
+                    clips_created = 0
+
+                    with zipfile.ZipFile(
+                        zip_buffer,
+                        "w",
+                        zipfile.ZIP_DEFLATED
+                    ) as zip_file:
+
+                        start = 0
+                        clip_number = 1
+
+                        while (
+                            start < total_duration
+                            and clip_number <= max_clips
+                        ):
+                            duration = min(
+                                clip_duration,
+                                total_duration - start
+                            )
+
+                            output_path = (
+                                temp_path /
+                                f"klip_{clip_number:02d}.mp4"
+                            )
+
+                            cut_video(
+                                input_path,
+                                start,
+                                duration,
+                                output_path
+                            )
+
+                            zip_file.write(
+                                output_path,
+                                output_path.name
+                            )
+
+                            clips_created += 1
+                            start += clip_duration
+                            clip_number += 1
+
+                    zip_buffer.seek(0)
+
+                    st.success(
+                        f"Berhasil membuat {clips_created} klip!"
+                    )
+
+                    st.download_button(
+                        "⬇️ Download Semua Klip (ZIP)",
+                        data=zip_buffer.getvalue(),
+                        file_name="ClipCerdas_Klip.zip",
+                        mime="application/zip"
+                    )
+
+            except FileNotFoundError:
+                st.error(
+                    "FFmpeg belum terpasang di server. "
+                    "Pastikan file packages.txt berisi ffmpeg."
+                )
+
+            except Exception as error:
+                st.error(f"Gagal memproses video: {error}")
+
+else:
+    st.info(
+        "Tempel link YouTube untuk pratinjau, atau upload video "
+        "untuk mulai membuat klip."
+    )
+
+st.divider()
+
+st.caption(
+    "ClipCerdas AI • MVP gratis • Gunakan video yang kamu miliki "
+    "atau yang penggunaannya sudah mendapat izin."
+)
